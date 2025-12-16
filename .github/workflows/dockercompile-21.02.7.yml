@@ -50,13 +50,6 @@ jobs:
             goarch: aarch64
             docker_tag: aarch64_generic
             rust_target: aarch64-unknown-linux-musl
-          - arch: aarch64_cortex-a53
-            target: armvirt
-            subtarget: 64_cortex-a53
-            package_arch: aarch64_cortex-a53
-            goarch: arm64
-            docker_tag: armvirt-64_cortex-a53
-            rust_target: aarch64-unknown-linux-musl
       fail-fast: false
     runs-on: ubuntu-latest
     env:
