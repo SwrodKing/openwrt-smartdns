@@ -88,28 +88,66 @@ jobs:
       - name: Build OpenSSL in Docker
         id: build-openssl
         run: |
-          opensslver=$(curl -s https://api.github.com/repos/openssl/openssl/releases | jq -r '[.[] | select(.tag_name | test("^openssl-3\\.6") and (test("alpha|beta|rc") | not)) | .tag_name][0]')
-          if [ -z "$opensslver" ]; then
-            opensslver="3.5.4"
+          # 尝试从 GitHub Releases 获取一个合适的 tag（保留原有意图），但后续用 openssl.org 下载真实 tarball
+          openssl_tag=$(curl -s https://api.github.com/repos/openssl/openssl/releases | jq -r '[.[] | select(.tag_name | test("(?i)openssl-3\\.6") and (test("alpha|beta|rc") | not)) | .tag_name][0]')
+          if [ -z "$openssl_tag" ] || [ "$openssl_tag" = "null" ]; then
+            # 回退到常见的 3.x 版本（可按需改）
+            version="3.5.4"
+          else
+            # 从 tag 中提取版本号，兼容 OpenSSL 的不同 tag 格式（如 OpenSSL_3_6_0 或 openssl-3.6.0）
+            # 把非数字/点字符替换为分隔，然后取连续的数字点串
+            version=$(echo "$openssl_tag" | sed -E 's/[^0-9.]/./g' | sed -E 's/\\.\\+/. /g' | sed -E 's/(^|\\.|_)+/./g' | sed -E 's/^\\.+//; s/\\.+$//' | grep -oE '[0-9]+(\\.[0-9]+)+' | head -n1)
+            if [ -z "$version" ]; then
+              version="3.5.4"
+            fi
           fi
-          echo "Build with OpenSSL version: $opensslver"
-          echo "opensslver=$opensslver" >> $GITHUB_OUTPUT
+      
+          echo "Selected OpenSSL version: $version (tag: ${openssl_tag:-none})"
+          echo "opensslver=$version" >> $GITHUB_OUTPUT
+      
           mkdir -p ${{ github.workspace }}/openssl
-          curl -sSL "https://github.com/openssl/openssl/releases/download/openssl-${opensslver}/openssl-${opensslver}.tar.gz" -o openssl.tar.gz
+      
+          # 优先从官方 openssl.org 下载源码 tarball（通常命名为 openssl-<x.y.z>.tar.gz）
+          url_org="https://www.openssl.org/source/openssl-${version}.tar.gz"
+          url_github="https://github.com/openssl/openssl/releases/download/${openssl_tag}/openssl-${openssl_tag}.tar.gz"
+      
+          echo "Try download: $url_org"
+          if ! curl -fSL "$url_org" -o openssl.tar.gz; then
+            echo "Failed to download from openssl.org, fallback to GitHub release URL: $url_github"
+            if ! curl -fSL "$url_github" -o openssl.tar.gz; then
+              echo "ERROR: failed to download openssl tarball from both openssl.org and GitHub."
+              exit 2
+            fi
+          fi
+      
+          # 验证下载内容是否真的是 gzip/tarball
+          echo "Downloaded file type:"
+          file openssl.tar.gz || true
+      
+          # 使用 gzip 测试并在失败时打印前几百字节帮助排查（常见是 HTML 错误页）
+          if ! gzip -t openssl.tar.gz 2>/dev/null; then
+            echo "Downloaded file is NOT a valid gzip archive. Dumping head of file for debug:"
+            head -c 2000 openssl.tar.gz || true
+            exit 3
+          fi
+      
+          # 解包到工作目录
           tar -zxvf openssl.tar.gz --strip-components=1 -C openssl
+      
+          # 下面保留原有构建脚本生成 docker-openssl.sh 文件与构建调用
           cd ${{ github.workspace }}
           rm -f docker-openssl.sh
-          cat > docker-openssl.sh << EOF
+          cat > docker-openssl.sh << 'EOF'
           apk add perl make coreutils tar pkgconfig dpkg binutils
           cd /workdir/openssl
-          if [ "\$GOARCH" == "x86_64" ]; then
+          if [ "$GOARCH" == "x86_64" ]; then
             ./Configure no-tests linux-x86_64 enable-quic enable-ktls no-docs --prefix=/usr/local --libdir=lib
-          elif [ "\$GOARCH" == "aarch64" ]; then
+          elif [ "$GOARCH" == "aarch64" ]; then
             ./Configure no-tests linux-aarch64 enable-quic enable-ktls no-docs --prefix=/usr/local --libdir=lib
-          elif [ "\$GOARCH" == "arm64" ]; then
+          elif [ "$GOARCH" == "arm64" ]; then
             ./Configure no-tests linux-aarch64 enable-quic enable-ktls no-docs --prefix=/usr/local --libdir=lib
           fi
-          make clean && make -j\$(nproc)
+          make clean && make -j$(nproc)
           make install_sw DESTDIR=/workdir/openssl-install
           EOF
           docker run -i --rm -v ${{ github.workspace }}:/workdir -e GOARCH=${{ matrix.goarch }} muslcc/x86_64:${{ matrix.goarch }}-linux-musl sh /workdir/docker-openssl.sh
